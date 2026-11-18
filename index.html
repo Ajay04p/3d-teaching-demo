@@ -16,6 +16,15 @@
   #bar{position:fixed;left:50%;bottom:16px;transform:translateX(-50%);display:flex;gap:8px;flex-wrap:wrap;justify-content:center}
   #bar button,#bar label{background:rgba(20,20,20,.75);color:#fff;border:1px solid rgba(255,255,255,.3);border-radius:20px;padding:8px 14px;font-size:14px;cursor:pointer}
   #bar input{display:none}
+  #lib{position:fixed;left:50%;bottom:70px;transform:translateX(-50%);background:rgba(15,15,20,.92);border:1px solid rgba(255,255,255,.2);border-radius:14px;padding:12px;display:none;width:min(92vw,520px)}
+  #lib h3{margin:0 0 8px;font-size:14px;font-weight:600;opacity:.8}
+  #libGrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px}
+  #libGrid button,#lib label{display:block;text-align:left;background:rgba(255,255,255,.07);color:#fff;border:1px solid rgba(255,255,255,.15);border-radius:10px;padding:10px;font-size:14px;cursor:pointer}
+  #libGrid button.on{border-color:#ffd23f;background:rgba(255,210,63,.15)}
+  #libGrid small{display:block;opacity:.65;font-size:12px;margin-top:2px}
+  #lib label{margin-top:8px;text-align:center}
+  #lib input{display:none}
+  #credits{font-size:11px;opacity:.55;margin-top:8px;line-height:1.4}
   #palm{position:fixed;width:56px;height:56px;pointer-events:none;display:none}
 </style>
 </head>
@@ -38,7 +47,13 @@
   <button id="explodeBtn">Explode</button>
   <button id="resetBtn">Reset</button>
   <button id="helpBtn">Hide tips</button>
-  <label>Load .glb<input id="file" type="file" accept=".glb,.gltf"></label>
+  <button id="libBtn">Models ▾</button>
+</div>
+<div id="lib">
+  <h3>Model library</h3>
+  <div id="libGrid"></div>
+  <label>Load your own .glb file<input id="file" type="file" accept=".glb,.gltf"></label>
+  <div id="credits">Engine, gearbox and buggy: glTF sample models from the Khronos Group (originally converted by Okino Computer Graphics). Solar system, atom and DNA are built in code and are not to scale.</div>
 </div>
 
 <script type="importmap">
@@ -71,16 +86,6 @@ const pivot = new THREE.Group(); scene.add(pivot);   // gets placed and rotated
 const basePos = new THREE.Vector3(), userOffset = new THREE.Vector3();
 let model = null, parts = [], explodeT = 0, explodeTarget = 0;
 
-function niceName(raw) {
-  const n = (raw || '').toLowerCase();
-  if (n.startsWith('piston')) return 'Piston';
-  if (n.startsWith('rod')) return 'Connecting rod';
-  if (n.startsWith('lifter')) return 'Valve lifter';
-  if (n.startsWith('spring')) return 'Valve spring link';
-  if (n.startsWith('body')) return 'Engine block part';
-  return (raw || 'Part').replace(/[_-]?\d[\d_-]*.*$/, '').replace(/_/g, ' ') || 'Part';
-}
-
 function layout() {
   const w = innerWidth, h = innerHeight;
   renderer.setSize(w, h, false);
@@ -92,36 +97,177 @@ function layout() {
 }
 addEventListener('resize', layout);
 
-function loadModel(url) {
-  msg.textContent = 'Loading model…';
-  new GLTFLoader().load(url, gltf => {
-    if (model) pivot.remove(model);
-    model = gltf.scene; parts = [];
-    // normalise size and centre it
-    const box = new THREE.Box3().setFromObject(model);
-    const size = box.getSize(new THREE.Vector3()), centre = box.getCenter(new THREE.Vector3());
-    const s = 2.4 / Math.max(size.x, size.y, size.z);
-    model.scale.setScalar(s);
-    model.position.copy(centre).multiplyScalar(-s);
-    pivot.rotation.set(0.35, -0.6, 0);
-    pivot.add(model);
-    model.updateMatrixWorld(true);
-    const mc = new THREE.Box3().setFromObject(model).getCenter(new THREE.Vector3());
-    model.traverse(o => {
-      if (!o.isMesh) return;
-      o.material = Array.isArray(o.material) ? o.material.map(m => m.clone()) : o.material.clone();
-      const c = new THREE.Box3().setFromObject(o).getCenter(new THREE.Vector3());
-      let dir = c.clone().sub(mc);
-      if (dir.length() < 0.05) dir.set(0, 1, 0);
-      dir.multiplyScalar(0.9);
-      // convert that world offset into the mesh's parent space
-      const a = o.parent.worldToLocal(c.clone()), b = o.parent.worldToLocal(c.clone().add(dir));
-      parts.push({ mesh: o, home: o.position.clone(), offset: b.sub(a), name: niceName(o.name || o.parent?.name) });
-    });
-    explodeT = explodeTarget = 0;
-    msg.textContent = handsReady ? 'Show your hand' : 'Starting camera…';
-  }, undefined, e => { msg.textContent = 'Could not load model: ' + e.message; });
+// ---------- procedural teaching models ----------
+const mat = (color, extra = {}) => new THREE.MeshStandardMaterial({ color, roughness: 0.5, metalness: 0.1, ...extra });
+const tag = (mesh, text) => { mesh.userData.label = text; return mesh; };
+
+function buildSolar() {
+  const g = new THREE.Group(), orbits = [];
+  g.add(tag(new THREE.Mesh(new THREE.SphereGeometry(1.1, 48, 32), mat(0xffc93c, { emissive: 0xff9900, emissiveIntensity: 0.9 })), 'Sun · a star, 99.8% of the solar system\'s mass'));
+  const P = [
+    ['Mercury', 0.24, 0xa8a29e, 1.9, 'closest to the Sun, no moons'],
+    ['Venus', 0.38, 0xe8c27a, 2.6, 'hottest planet, thick CO₂ clouds'],
+    ['Earth', 0.4, 0x3b82f6, 3.5, 'our home, liquid water'],
+    ['Mars', 0.3, 0xdc5a32, 4.4, 'the red planet, iron oxide dust'],
+    ['Jupiter', 0.8, 0xd9a066, 5.7, 'largest planet, gas giant'],
+    ['Saturn', 0.66, 0xe9d18f, 7.4, 'gas giant with bright rings'],
+    ['Uranus', 0.5, 0x7dd3fc, 8.8, 'ice giant, tilted on its side'],
+    ['Neptune', 0.48, 0x3b5bdb, 9.9, 'windiest planet, ice giant'],
+  ];
+  P.forEach(([name, r, col, d, fact], i) => {
+    const orbit = new THREE.Group(); orbit.rotation.y = i * 1.3; g.add(orbit);
+    const ring = new THREE.Mesh(new THREE.TorusGeometry(d, 0.012, 6, 128), new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.25 }));
+    ring.rotation.x = Math.PI / 2; ring.raycast = () => {}; ring.userData.static = true; g.add(ring);
+    const pl = tag(new THREE.Mesh(new THREE.SphereGeometry(r, 32, 24), mat(col)), `${name} · ${fact}`);
+    pl.position.x = d; orbit.add(pl);
+    if (name === 'Saturn') {
+      const rings = tag(new THREE.Mesh(new THREE.RingGeometry(r * 1.3, r * 1.9, 64), mat(0xd6c08a, { side: THREE.DoubleSide, transparent: true, opacity: 0.8 })), 'Saturn\'s rings · ice and rock');
+      rings.position.x = d; rings.rotation.x = -Math.PI / 2.4; orbit.add(rings);
+    }
+    if (name === 'Earth') {
+      const moonOrbit = new THREE.Group(); moonOrbit.position.x = d; orbit.add(moonOrbit);
+      const moon = tag(new THREE.Mesh(new THREE.SphereGeometry(0.11, 16, 12), mat(0xd4d4d8)), 'The Moon · Earth\'s only natural satellite');
+      moon.position.x = 0.62; moonOrbit.add(moon); orbits.push([moonOrbit, 1.5]);
+    }
+    orbits.push([orbit, 0.6 / Math.pow(d, 1.5) * 3]);
+  });
+  g.userData.update = dt => orbits.forEach(([o, sp]) => o.rotation.y += sp * dt * 0.4);
+  g.userData.view = [0.75, 0, 0];
+  return g;
 }
+
+function buildAtom() {
+  const g = new THREE.Group(), shells = [];
+  const nuc = new THREE.Group(); g.add(nuc);
+  // 6 protons + 6 neutrons packed in a small ball
+  for (let i = 0; i < 12; i++) {
+    const proton = i % 2 === 0;
+    const phi = Math.acos(1 - 2 * (i + 0.5) / 12), th = Math.PI * (1 + Math.sqrt(5)) * i;
+    const m = tag(new THREE.Mesh(new THREE.SphereGeometry(0.28, 24, 16), mat(proton ? 0xef4444 : 0x9ca3af)),
+      proton ? 'Proton · positive charge (+1)' : 'Neutron · no charge');
+    m.position.setFromSphericalCoords(0.36, phi, th); nuc.add(m);
+  }
+  const shellDefs = [[1.6, 2, 'inner shell (holds up to 2)', 0.9], [2.8, 4, 'outer shell, 4 of 8 places filled', 0.5]];
+  shellDefs.forEach(([r, n, txt, sp], si) => {
+    const sh = new THREE.Group(); sh.rotation.set(si ? 1.1 : 0.4, si ? 0.5 : -0.3, 0); g.add(sh);
+    const path = new THREE.Mesh(new THREE.TorusGeometry(r, 0.015, 6, 128), new THREE.MeshBasicMaterial({ color: 0x93c5fd, transparent: true, opacity: 0.5 }));
+    path.raycast = () => {}; path.userData.static = true; sh.add(path);
+    const spin = new THREE.Group(); sh.add(spin);
+    for (let k = 0; k < n; k++) {
+      const e = tag(new THREE.Mesh(new THREE.SphereGeometry(0.13, 16, 12), mat(0x60a5fa, { emissive: 0x2563eb, emissiveIntensity: 0.6 })), `Electron · negative charge (−1), ${txt}`);
+      const a = k / n * Math.PI * 2; e.position.set(Math.cos(a) * r, Math.sin(a) * r, 0); spin.add(e);
+    }
+    shells.push([spin, sp]);
+  });
+  g.userData.update = dt => shells.forEach(([s, sp]) => s.rotation.z += sp * dt);
+  return g;
+}
+
+function buildDNA() {
+  const g = new THREE.Group(), helix = new THREE.Group(); g.add(helix);
+  const seq = 'ATGCGTACCATG', bases = { A: ['Adenine', 0x22c55e, 'T'], T: ['Thymine', 0xef4444, 'A'], G: ['Guanine', 0xf59e0b, 'C'], C: ['Cytosine', 0x3b82f6, 'G'] };
+  const R = 1.0, step = 0.45, twist = Math.PI / 5;
+  [...seq].forEach((b, i) => {
+    const y = (i - seq.length / 2) * step, a = i * twist;
+    const ends = [a, a + Math.PI].map(t => new THREE.Vector3(Math.cos(t) * R, y, Math.sin(t) * R));
+    const pair = [b, bases[b][2]];
+    ends.forEach((p, side) => {
+      const sugar = tag(new THREE.Mesh(new THREE.SphereGeometry(0.16, 16, 12), mat(0xe5e7eb)), 'Deoxyribose sugar · part of the backbone');
+      sugar.position.copy(p); helix.add(sugar);
+      const ph = tag(new THREE.Mesh(new THREE.SphereGeometry(0.12, 16, 12), mat(0xa855f7)), 'Phosphate group · links the sugars into a backbone');
+      const pa = a + side * Math.PI + twist / 2;
+      ph.position.set(Math.cos(pa) * R * 1.08, y + step / 2, Math.sin(pa) * R * 1.08); helix.add(ph);
+      // half of the base-pair rung, from the sugar toward the centre
+      const [nm, col, partner] = bases[pair[side]];
+      const half = tag(new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.07, R * 0.92, 10), mat(col)), `${nm} (${pair[side]}) · pairs with ${bases[partner][0]}`);
+      half.position.copy(p).multiplyScalar(0.52).setY(y);
+      half.lookAt(new THREE.Vector3(0, y, 0)); half.rotateX(Math.PI / 2);
+      helix.add(half);
+    });
+  });
+  g.userData.update = dt => helix.rotation.y += dt * 0.25;
+  g.userData.view = [0.15, 0, 0];
+  return g;
+}
+
+// ---------- model library ----------
+const generic = fallback => raw => fallback;
+const LIBRARY = [
+  { id: 'engine', name: 'Car engine', note: 'Twin-cylinder engine', url: 'models/engine.glb',
+    label: raw => { const n = (raw || '').toLowerCase();
+      return n.startsWith('piston') ? 'Piston' : n.startsWith('rod') ? 'Connecting rod' : n.startsWith('lifter') ? 'Valve lifter'
+        : n.startsWith('spring') ? 'Valve spring link' : 'Engine block part'; } },
+  { id: 'gearbox', name: 'Gearbox', note: 'Gears and shafts', url: 'models/gearbox.glb', label: generic('Gearbox part') },
+  { id: 'buggy', name: 'Buggy', note: 'Toy car with ~150 parts', url: 'models/buggy.glb',
+    label: raw => { const n = (raw || '').toLowerCase();
+      if (n.includes('driver')) return 'Driver · ' + (n.match(/driver_([a-z]+)/)?.[1] || 'figure');
+      if (n.includes('shaft')) return 'Axle / shaft'; if (n.includes('light')) return 'Light';
+      if (n.includes('bump')) return 'Suspension support'; return 'Chassis part'; } },
+  { id: 'solar', name: 'Solar system', note: 'Animated orbits', build: buildSolar, fit: 4.2 },
+  { id: 'atom', name: 'Carbon atom', note: 'Protons, neutrons, electrons', build: buildAtom },
+  { id: 'dna', name: 'DNA', note: 'Double helix, base pairs', build: buildDNA },
+];
+let current = null, loadToken = 0;
+const gltfCache = {};
+
+function selectModel(entry) {
+  current = entry;
+  document.querySelectorAll('#libGrid button').forEach(b => b.classList.toggle('on', b.dataset.id === entry.id));
+  $('lib').style.display = 'none';
+  if (entry.build) return setModel(entry.build(), entry);
+  const token = ++loadToken;
+  msg.textContent = `Loading ${entry.name}…`;
+  if (gltfCache[entry.url]) return setModel(gltfCache[entry.url].clone(true), entry);
+  new GLTFLoader().load(entry.url, gltf => {
+    if (token !== loadToken) return;          // user picked something else meanwhile
+    gltfCache[entry.url] = gltf.scene;
+    setModel(gltf.scene.clone(true), entry);
+  }, undefined, e => { msg.textContent = 'Could not load model: ' + (e.message || e); });
+}
+
+function setModel(obj, entry) {
+  setHighlight(null); label.style.display = 'none';
+  if (model) pivot.remove(model);
+  model = obj; parts = [];
+  // normalise size and centre it
+  const box = new THREE.Box3().setFromObject(model);
+  const size = box.getSize(new THREE.Vector3()), centre = box.getCenter(new THREE.Vector3());
+  const s = (entry.fit || 2.4) / Math.max(size.x, size.y, size.z);
+  model.scale.setScalar(s);
+  model.position.copy(centre).multiplyScalar(-s);
+  const v = entry.view || model.userData.view || [0.35, -0.6, 0];
+  pivot.rotation.set(...v); pivot.scale.setScalar(1); userOffset.set(0, 0, 0);
+  pivot.add(model);
+  model.updateMatrixWorld(true);
+  const mc = new THREE.Box3().setFromObject(model).getCenter(new THREE.Vector3());
+  const spread = new THREE.Box3().setFromObject(model).getSize(new THREE.Vector3()).length() * 0.25;
+  model.traverse(o => {
+    if (!o.isMesh || o.userData.static) return;
+    o.material = Array.isArray(o.material) ? o.material.map(m => m.clone()) : o.material.clone();
+    (Array.isArray(o.material) ? o.material : [o.material]).forEach(m => {
+      if (m.emissive) m.userData.base = { color: m.emissive.clone(), k: m.emissiveIntensity };
+    });
+    const c = new THREE.Box3().setFromObject(o).getCenter(new THREE.Vector3());
+    let dir = c.clone().sub(mc);
+    if (dir.length() < 0.05) dir.set(0, 1, 0);
+    dir.normalize().multiplyScalar(spread);
+    // convert that world offset into the mesh's parent space
+    const a = o.parent.worldToLocal(c.clone()), b = o.parent.worldToLocal(c.clone().add(dir));
+    const name = o.userData.label || (entry.label || generic('Part'))(o.name || o.parent?.name);
+    parts.push({ mesh: o, home: o.position.clone(), offset: b.sub(a), name });
+  });
+  explodeT = explodeTarget = 0; $('explodeBtn').textContent = 'Explode';
+  msg.textContent = handsReady ? 'Show your hand' : `${entry.name} loaded`;
+}
+
+// library panel
+LIBRARY.forEach(entry => {
+  const b = document.createElement('button');
+  b.dataset.id = entry.id; b.innerHTML = `${entry.name}<small>${entry.note}</small>`;
+  b.onclick = () => selectModel(entry);
+  $('libGrid').appendChild(b);
+});
+$('libBtn').onclick = () => { const l = $('lib'); l.style.display = l.style.display === 'block' ? 'none' : 'block'; };
 
 let hovered = null;
 function setHighlight(part) {
@@ -129,7 +275,11 @@ function setHighlight(part) {
   const paint = (p, on) => {
     if (!p) return;
     const ms = Array.isArray(p.mesh.material) ? p.mesh.material : [p.mesh.material];
-    ms.forEach(m => { if (m.emissive) { m.emissive.set(on ? 0xffaa00 : 0x000000); m.emissiveIntensity = on ? 0.8 : 1; } });
+    ms.forEach(m => {
+      if (!m.emissive) return;
+      const base = m.userData.base || { color: new THREE.Color(0), k: 1 };
+      if (on) { m.emissive.set(0xffaa00); m.emissiveIntensity = 0.8; } else { m.emissive.copy(base.color); m.emissiveIntensity = base.k; }
+    });
   };
   paint(hovered, false); paint(part, true); hovered = part;
 }
@@ -165,9 +315,10 @@ function showLabel(p, x, y) {
 
 const toggleExplode = () => { explodeTarget = explodeTarget > 0.5 ? 0 : 1; $('explodeBtn').textContent = explodeTarget > 0.5 ? 'Reassemble' : 'Explode'; };
 $('explodeBtn').onclick = toggleExplode;
-$('resetBtn').onclick = () => { pivot.rotation.set(0.35, -0.6, 0); pivot.scale.setScalar(1); userOffset.set(0, 0, 0); explodeTarget = 0; $('explodeBtn').textContent = 'Explode'; camera.position.set(0, 0, 7); layout(); };
+$('resetBtn').onclick = () => { pivot.rotation.set(...((current && (current.view || model?.userData.view)) || [0.35, -0.6, 0])); pivot.scale.setScalar(1); userOffset.set(0, 0, 0); explodeTarget = 0; $('explodeBtn').textContent = 'Explode'; camera.position.set(0, 0, 7); layout(); };
 $('helpBtn').onclick = () => { const h = $('help'); const hide = h.style.display !== 'none'; h.style.display = hide ? 'none' : 'block'; $('helpBtn').textContent = hide ? 'Show tips' : 'Hide tips'; };
-$('file').onchange = e => { const f = e.target.files[0]; if (f) loadModel(URL.createObjectURL(f)); };
+$('file').onchange = e => { const f = e.target.files[0]; if (!f) return; const url = URL.createObjectURL(f);
+  selectModel({ id: 'upload:' + f.name, name: f.name, url, label: raw => (raw || 'Part').replace(/[_-]?\d[\d_-]*$/, '').replace(/_/g, ' ') || 'Part' }); };
 
 // ---------- hand tracking ----------
 let hands = null, handsReady = false, handVisible = false, lastVideoTime = -1;
@@ -328,6 +479,8 @@ function animate() {
       if (msg.textContent !== 'Show your hand') { msg.textContent = 'Show your hand'; setHighlight(null); label.style.display = 'none'; }
     }
   }
+  const now = performance.now(), dt = Math.min((now - (animate.t || now)) / 1000, 0.1); animate.t = now;
+  if (model?.userData.update) model.userData.update(dt);
   pivot.position.copy(basePos).add(userOffset);
   explodeT += (explodeTarget - explodeT) * 0.12;
   for (const p of parts) p.mesh.position.copy(p.home).addScaledVector(p.offset, explodeT);
@@ -339,7 +492,7 @@ function animate() {
 window.__feed = list => { handVisible = true; handleHands(list); return { scale: pivot.scale.x, off: userOffset.toArray(), explode: explodeTarget, msg: msg.textContent }; };
 
 layout();
-loadModel('models/engine.glb');
+selectModel(LIBRARY[0]);
 startHands();
 animate();
 </script>
