@@ -16,6 +16,7 @@
   #bar{position:fixed;left:50%;bottom:16px;transform:translateX(-50%);display:flex;gap:8px;flex-wrap:wrap;justify-content:center}
   #bar button,#bar label{background:rgba(20,20,20,.75);color:#fff;border:1px solid rgba(255,255,255,.3);border-radius:20px;padding:8px 14px;font-size:14px;cursor:pointer}
   #bar input{display:none}
+  #bar button.on{border-color:#60a5fa;background:rgba(37,99,235,.5)}
   #lib{position:fixed;left:50%;bottom:70px;transform:translateX(-50%);background:rgba(15,15,20,.92);border:1px solid rgba(255,255,255,.2);border-radius:14px;padding:12px;display:none;width:min(92vw,520px)}
   #lib h3{margin:0 0 8px;font-size:14px;font-weight:600;opacity:.8}
   #libGrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px}
@@ -37,14 +38,16 @@
 <svg id="palm" viewBox="0 0 56 56"><circle cx="28" cy="28" r="24" fill="none" stroke="rgba(255,255,255,.25)" stroke-width="5"/><circle id="palmRing" cx="28" cy="28" r="24" fill="none" stroke="#4ade80" stroke-width="5" stroke-dasharray="151" stroke-dashoffset="151" transform="rotate(-90 28 28)"/></svg>
 <div id="help">
   <b>Point</b> at a part to highlight it<br>
-  <b>Pinch &amp; drag</b> to rotate<br>
-  <b>Pinch with both hands</b>: pull apart to zoom, twist to turn, move together to reposition<br>
-  <b>Two open palms</b>: spread apart to explode, bring together to reassemble<br>
-  <b>One open palm</b> (hold) to toggle explode<br>
+  <b>Pinch on the model</b> &amp; drag to rotate<br>
+  <b>Pinch on the model with both hands</b>: pull apart to zoom, twist to turn<br>
+  <b>Two open palms together, then spread</b> to explode<br>
+  <b>Open palm over the model</b> (hold) to toggle explode<br>
+  <b>Fist</b> (hold 1s) to lock / unlock so you can talk freely<br>
   Touch or mouse also work
 </div>
 <div id="bar">
   <button id="explodeBtn">Explode</button>
+  <button id="lockBtn">Lock</button>
   <button id="resetBtn">Reset</button>
   <button id="helpBtn">Hide tips</button>
   <button id="libBtn">Models ▾</button>
@@ -267,6 +270,8 @@ LIBRARY.forEach(entry => {
   b.onclick = () => selectModel(entry);
   $('libGrid').appendChild(b);
 });
+$('lockBtn').onclick = () => setLocked(!locked);
+addEventListener('keydown', e => { if (e.key === 'l' || e.key === 'L') setLocked(!locked); });
 $('libBtn').onclick = () => { const l = $('lib'); l.style.display = l.style.display === 'block' ? 'none' : 'block'; };
 
 let hovered = null;
@@ -299,7 +304,7 @@ cv.addEventListener('pointerdown', e => { drag = { x: e.clientX, y: e.clientY };
 cv.addEventListener('pointerup', () => { drag = null; });
 cv.addEventListener('pointermove', e => {
   if (handVisible) return;
-  if (drag) {
+  if (drag && !locked) {
     rotateBy((e.clientX - drag.x) * 0.85, (e.clientY - drag.y) * 0.85);
     drag = { x: e.clientX, y: e.clientY };
   }
@@ -323,11 +328,12 @@ $('file').onchange = e => { const f = e.target.files[0]; if (!f) return; const u
 // ---------- hand tracking ----------
 let hands = null, handsReady = false, handVisible = false, lastVideoTime = -1;
 const H = [mkHand(), mkHand()];      // slot 0 = left on screen, slot 1 = right on screen
-function mkHand() { return { tip: null, pinching: false, lastPinch: null, open: false, seen: false }; }
-let palmStart = 0, palmLatched = false;
+function mkHand() { return { tip: null, pinchRaw: false, pinchSince: 0, pinching: false, grabbing: false, lastPinch: null, open: false, fist: false, seen: false, ratio: 1 }; }
+let palmStart = 0, palmLatched = false, fistStart = 0, fistLatched = false, locked = false;
 let two = null;                      // state for two-hand pinch gesture
 let spread = null;                   // state for two-palm explode gesture
 const camDir = new THREE.Vector3(0, 0, 1);
+const PINCH_ON = 0.25, PINCH_OFF = 0.4, PINCH_HOLD_MS = 120, DEADZONE = 1.5;
 
 function toScreen(lm) {
   // map normalised video coords onto the cover-scaled, mirrored video on screen
@@ -339,16 +345,44 @@ const d2 = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
 // world units per screen pixel at the model's depth
 const worldPerPx = () => 2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * (camera.position.z - pivot.position.z) / innerHeight;
 
-function readHand(st, lm) {
+// is a screen point on (or right next to) the model?
+const _box = new THREE.Box3(), _v = new THREE.Vector3();
+function overModel(pt, pad = 40) {
+  if (!model) return false;
+  if (pick(pt.x, pt.y)) return true;
+  _box.setFromObject(model);
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (let i = 0; i < 8; i++) {
+    _v.set(i & 1 ? _box.max.x : _box.min.x, i & 2 ? _box.max.y : _box.min.y, i & 4 ? _box.max.z : _box.min.z).project(camera);
+    const sx = (_v.x + 1) / 2 * innerWidth, sy = (1 - _v.y) / 2 * innerHeight;
+    x0 = Math.min(x0, sx); x1 = Math.max(x1, sx); y0 = Math.min(y0, sy); y1 = Math.max(y1, sy);
+  }
+  return pt.x > x0 - pad && pt.x < x1 + pad && pt.y > y0 - pad && pt.y < y1 + pad;
+}
+
+function readHand(st, lm, now) {
   st.seen = true;
   const handSize = d2(lm[0], lm[9]);
-  const pinchRatio = d2(lm[4], lm[8]) / handSize;
-  if (!st.pinching && pinchRatio < 0.32) st.pinching = true;
-  else if (st.pinching && pinchRatio > 0.5) st.pinching = false;
-  const raw = toScreen(st.pinching ? { x: (lm[4].x + lm[8].x) / 2, y: (lm[4].y + lm[8].y) / 2 } : lm[8]);
-  st.tip = st.tip ? { x: st.tip.x + (raw.x - st.tip.x) * 0.5, y: st.tip.y + (raw.y - st.tip.y) * 0.5 } : raw;
-  const extended = [[8, 6], [12, 10], [16, 14], [20, 18]].every(([t, p]) => d2(lm[t], lm[0]) > d2(lm[p], lm[0]) * 1.15);
-  st.open = extended && pinchRatio > 0.6;
+  st.ratio = d2(lm[4], lm[8]) / handSize;
+  // raw pinch with hysteresis, then it must hold briefly before it counts
+  if (!st.pinchRaw && st.ratio < PINCH_ON) { st.pinchRaw = true; st.pinchSince = now; }
+  else if (st.pinchRaw && st.ratio > PINCH_OFF) st.pinchRaw = false;
+  const wasPinching = st.pinching;
+  st.pinching = st.pinchRaw && now - st.pinchSince > PINCH_HOLD_MS;
+
+  // smoothed cursor: heavier smoothing for small moves, lighter for big ones (cuts jitter, keeps it responsive)
+  const raw = toScreen(st.pinchRaw ? { x: (lm[4].x + lm[8].x) / 2, y: (lm[4].y + lm[8].y) / 2 } : lm[8]);
+  if (!st.tip) st.tip = raw;
+  else { const dist = d2(raw, st.tip), a = THREE.MathUtils.clamp(dist / 60, 0.15, 0.6); st.tip = { x: st.tip.x + (raw.x - st.tip.x) * a, y: st.tip.y + (raw.y - st.tip.y) * a }; }
+
+  // a pinch only "grabs" if it starts on the model
+  if (st.pinching && !wasPinching) st.grabbing = overModel(st.tip);
+  if (!st.pinching) st.grabbing = false;
+
+  const ext = ([t, p]) => d2(lm[t], lm[0]) > d2(lm[p], lm[0]) * 1.15;
+  const fingers = [[8, 6], [12, 10], [16, 14], [20, 18]];
+  st.open = fingers.every(ext) && st.ratio > 0.6;
+  st.fist = fingers.every(f => !ext(f)) && fingers.every(([t]) => d2(lm[t], lm[0]) < handSize * 1.25);
   st.palm = toScreen(lm[9]);
 }
 
@@ -359,79 +393,106 @@ function rotateBy(dx, dy) {
 }
 
 function setExplodeLabel() { $('explodeBtn').textContent = explodeTarget > 0.5 ? 'Reassemble' : 'Explode'; }
+function setLocked(v) {
+  locked = v; two = null; spread = null; H.forEach(h => { h.grabbing = false; h.lastPinch = null; });
+  $('lockBtn').textContent = locked ? '🔒 Locked' : 'Lock';
+  $('lockBtn').classList.toggle('on', locked);
+}
+
+// ring indicator for "hold" gestures
+function showRing(pt, prog, color) {
+  palmEl.style.display = 'block';
+  palmEl.style.left = (pt.x - 28) + 'px'; palmEl.style.top = (pt.y - 28) + 'px';
+  palmRing.setAttribute('stroke', color);
+  palmRing.setAttribute('stroke-dashoffset', 151 * (1 - prog));
+}
 
 function handleHands(list) {
+  const now = performance.now();
   // sort by screen x so each hand keeps its slot
   list.sort((a, b) => toScreen(a[0]).x - toScreen(b[0]).x);
   H.forEach(h => h.seen = false);
   if (list.length === 1) {
-    // keep the single hand in whichever slot it was nearest to last frame
     const x = toScreen(list[0][0]).x, slot = (H[1].tip && (!H[0].tip || Math.abs(H[1].tip.x - x) < Math.abs(H[0].tip.x - x))) ? 1 : 0;
-    readHand(H[slot], list[0]);
-  } else list.forEach((lm, i) => readHand(H[i], lm));
+    readHand(H[slot], list[0], now);
+  } else list.forEach((lm, i) => readHand(H[i], lm, now));
   H.forEach(h => { if (!h.seen) Object.assign(h, mkHand()); });
 
   const live = H.filter(h => h.seen);
   const both = live.length === 2;
-  let status = 'Pointing';
+  let status = locked ? '🔒 Locked · hold a fist to unlock' : 'Pointing';
+  let ring = false;
 
-  // --- two hands pinching: zoom, twist, move ---
-  if (both && H[0].pinching && H[1].pinching) {
-    const a = H[0].tip, b = H[1].tip;
-    const dist = d2(a, b), ang = Math.atan2(b.y - a.y, b.x - a.x), mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
-    if (!two) two = { dist, ang, mid, scale: pivot.scale.x, q: pivot.quaternion.clone(), off: userOffset.clone() };
-    const sc = THREE.MathUtils.clamp(two.scale * dist / two.dist, 0.3, 4);
-    pivot.scale.setScalar(sc);
-    const twist = new THREE.Quaternion().setFromAxisAngle(camDir, -(ang - two.ang));
-    pivot.quaternion.copy(two.q).premultiply(twist);
-    const k = worldPerPx();
-    userOffset.set(two.off.x + (mid.x - two.mid.x) * k, two.off.y - (mid.y - two.mid.y) * k, 0);
-    H.forEach(h => h.lastPinch = null);
-    setHighlight(null); label.style.display = 'none';
-    status = 'Two hands: zoom · twist · move';
-  } else {
-    two = null;
-    // --- two open palms: spread apart to explode, bring together to reassemble ---
-    if (both && H[0].open && H[1].open) {
-      const dist = d2(H[0].palm, H[1].palm) / innerWidth;
-      if (!spread) spread = { dist, start: explodeTarget };
-      explodeTarget = THREE.MathUtils.clamp(spread.start + (dist - spread.dist) * 2.5, 0, 1);
-      setExplodeLabel();
-      palmStart = 0; palmLatched = true; palmEl.style.display = 'none';
+  // --- fist held ~1s: lock / unlock (works in both states) ---
+  const fistHand = live.find(h => h.fist);
+  if (fistHand && !fistLatched) {
+    if (!fistStart) fistStart = now;
+    const prog = Math.min((now - fistStart) / 1000, 1);
+    showRing(fistHand.palm, prog, '#60a5fa'); ring = true;
+    status = locked ? 'Hold fist to unlock…' : 'Hold fist to lock…';
+    if (prog >= 1) { setLocked(!locked); fistLatched = true; }
+  } else if (!fistHand) { fistStart = 0; fistLatched = false; }
+
+  if (!locked && !fistHand) {
+    // --- two hands pinching (at least one grabbed the model): zoom, twist, move ---
+    if (both && H[0].pinching && H[1].pinching && (two || H[0].grabbing || H[1].grabbing)) {
+      const a = H[0].tip, b = H[1].tip;
+      const dist = d2(a, b), ang = Math.atan2(b.y - a.y, b.x - a.x), mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+      if (!two) two = { dist, ang, mid, scale: pivot.scale.x, q: pivot.quaternion.clone(), off: userOffset.clone() };
+      pivot.scale.setScalar(THREE.MathUtils.clamp(two.scale * dist / two.dist, 0.3, 4));
+      pivot.quaternion.copy(two.q).premultiply(new THREE.Quaternion().setFromAxisAngle(camDir, -(ang - two.ang)));
+      const k = worldPerPx();
+      userOffset.set(two.off.x + (mid.x - two.mid.x) * k, two.off.y - (mid.y - two.mid.y) * k, 0);
+      H.forEach(h => { h.lastPinch = null; h.grabbing = true; });
       setHighlight(null); label.style.display = 'none';
-      status = 'Spread hands to explode · bring together to assemble';
+      status = 'Two hands: zoom · twist · move';
     } else {
-      spread = null;
-      // --- one-hand pinch: rotate ---
-      const pincher = live.find(h => h.pinching);
-      if (pincher) {
-        if (pincher.lastPinch) rotateBy(pincher.tip.x - pincher.lastPinch.x, pincher.tip.y - pincher.lastPinch.y);
-        pincher.lastPinch = { ...pincher.tip };
-        status = 'Rotating';
-      }
-      live.forEach(h => { if (!h.pinching) h.lastPinch = null; });
-      // --- pointing: highlight with the first hand that isn't pinching or open ---
-      const pointer = live.find(h => !h.pinching && !h.open);
-      const p = pointer ? pick(pointer.tip.x, pointer.tip.y) : null;
-      setHighlight(p); if (pointer) showLabel(p, pointer.tip.x, pointer.tip.y); else label.style.display = 'none';
-
-      // --- one open palm held ~0.8s: toggle explode ---
-      const palmHand = live.length === 1 ? live.find(h => h.open) : null;
-      const now = performance.now();
-      if (palmHand && !palmLatched) {
-        if (!palmStart) palmStart = now;
-        const prog = Math.min((now - palmStart) / 800, 1);
-        palmEl.style.display = 'block';
-        palmEl.style.left = (palmHand.palm.x - 28) + 'px'; palmEl.style.top = (palmHand.palm.y - 28) + 'px';
-        palmRing.setAttribute('stroke-dashoffset', 151 * (1 - prog));
-        status = 'Hold open palm…';
-        if (prog >= 1) { explodeTarget = explodeTarget > 0.5 ? 0 : 1; setExplodeLabel(); palmLatched = true; palmEl.style.display = 'none'; }
+      two = null;
+      // --- two open palms that START close together: spread apart to explode ---
+      const palmsDist = both ? d2(H[0].palm, H[1].palm) / innerWidth : 0;
+      if (both && H[0].open && H[1].open && (spread || palmsDist < 0.22)) {
+        if (!spread) spread = { dist: palmsDist, start: explodeTarget };
+        explodeTarget = THREE.MathUtils.clamp(spread.start + (palmsDist - spread.dist) * 2.5, 0, 1);
+        setExplodeLabel();
+        palmStart = 0; palmLatched = true;
+        setHighlight(null); label.style.display = 'none';
+        status = 'Spread hands to explode · bring together to assemble';
       } else {
-        palmEl.style.display = 'none';
-        if (!live.some(h => h.open)) { palmStart = 0; palmLatched = false; }
-        else if (palmLatched && !pincher) status = 'Close your hand';
+        if (!(both && H[0].open && H[1].open)) spread = null;
+        // --- one-hand pinch that grabbed the model: rotate ---
+        const grabber = live.find(h => h.grabbing);
+        if (grabber) {
+          // stop the instant the fingers start to part, and ignore tiny jitter
+          if (grabber.lastPinch && grabber.ratio < PINCH_ON + 0.05) {
+            const dx = grabber.tip.x - grabber.lastPinch.x, dy = grabber.tip.y - grabber.lastPinch.y;
+            if (Math.hypot(dx, dy) > DEADZONE) rotateBy(dx, dy);
+          }
+          grabber.lastPinch = { ...grabber.tip };
+          status = 'Rotating';
+        }
+        live.forEach(h => { if (!h.grabbing) h.lastPinch = null; });
+
+        // --- one open palm held ~0.8s over the model: toggle explode ---
+        const palmHand = live.length === 1 ? live.find(h => h.open && overModel(h.palm, 0)) : null;
+        if (palmHand && !palmLatched) {
+          if (!palmStart) palmStart = now;
+          const prog = Math.min((now - palmStart) / 800, 1);
+          showRing(palmHand.palm, prog, '#4ade80'); ring = true;
+          status = 'Hold open palm…';
+          if (prog >= 1) { explodeTarget = explodeTarget > 0.5 ? 0 : 1; setExplodeLabel(); palmLatched = true; }
+        } else if (!live.some(h => h.open)) { palmStart = 0; palmLatched = false; }
+        else if (!palmHand) palmStart = 0;
       }
     }
+  } else { two = null; spread = null; H.forEach(h => h.lastPinch = null); }
+
+  if (!ring) palmEl.style.display = 'none';
+
+  // --- pointing: highlight with the first hand that isn't pinching, open or a fist (works while locked) ---
+  if (!two && !spread) {
+    const pointer = live.find(h => !h.pinchRaw && !h.open && !h.fist);
+    const p = pointer ? pick(pointer.tip.x, pointer.tip.y) : null;
+    setHighlight(p); if (pointer) showLabel(p, pointer.tip.x, pointer.tip.y); else label.style.display = 'none';
   }
   msg.textContent = status;
 }
@@ -446,8 +507,8 @@ function drawCursor() {
   }
   for (const h of live) {
     octx.beginPath();
-    octx.arc(h.tip.x, h.tip.y, h.pinching ? 18 : 12, 0, Math.PI * 2);
-    octx.fillStyle = two ? 'rgba(96,165,250,.95)' : h.pinching ? 'rgba(74,222,128,.9)' : 'rgba(255,60,60,.9)';
+    octx.arc(h.tip.x, h.tip.y, h.grabbing ? 18 : 12, 0, Math.PI * 2);
+    octx.fillStyle = two ? 'rgba(96,165,250,.95)' : h.grabbing ? 'rgba(74,222,128,.9)' : (h.pinchRaw || locked) ? 'rgba(200,200,200,.8)' : 'rgba(255,60,60,.9)';
     octx.fill(); octx.lineWidth = 3; octx.strokeStyle = '#fff'; octx.stroke();
   }
 }
@@ -489,7 +550,7 @@ function animate() {
 }
 
 // test hook: feed fake landmarks (used for automated checks)
-window.__feed = list => { handVisible = true; handleHands(list); return { scale: pivot.scale.x, off: userOffset.toArray(), explode: explodeTarget, msg: msg.textContent }; };
+window.__feed = list => { handVisible = true; handleHands(list); return { scale: +pivot.scale.x.toFixed(3), q: pivot.quaternion.toArray().map(v => +v.toFixed(3)), explode: explodeTarget, locked, msg: msg.textContent }; };
 
 layout();
 selectModel(LIBRARY[0]);
