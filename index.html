@@ -1,50 +1,270 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Hand tracking demo</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>3D Teaching Studio – demo</title>
+<style>
+  html,body{margin:0;height:100%;background:#000;overflow:hidden;font-family:system-ui,sans-serif;color:#fff}
+  #cam{position:fixed;inset:0;width:100vw;height:100vh;object-fit:cover;transform:scaleX(-1)}
+  #three,#overlay{position:fixed;inset:0;width:100vw;height:100vh}
+  #three{touch-action:none}
+  #overlay{pointer-events:none}
+  #msg{position:fixed;top:12px;left:12px;background:rgba(0,0,0,.55);padding:6px 10px;border-radius:8px;font-size:15px}
+  #label{position:fixed;pointer-events:none;background:#ffd23f;color:#111;font-weight:600;padding:4px 10px;border-radius:6px;font-size:15px;display:none;transform:translate(18px,-50%)}
+  #help{position:fixed;top:12px;right:12px;background:rgba(0,0,0,.55);padding:8px 12px;border-radius:8px;font-size:13px;line-height:1.5;max-width:230px}
+  #bar{position:fixed;left:50%;bottom:16px;transform:translateX(-50%);display:flex;gap:8px;flex-wrap:wrap;justify-content:center}
+  #bar button,#bar label{background:rgba(20,20,20,.75);color:#fff;border:1px solid rgba(255,255,255,.3);border-radius:20px;padding:8px 14px;font-size:14px;cursor:pointer}
+  #bar input{display:none}
+  #palm{position:fixed;width:56px;height:56px;pointer-events:none;display:none}
+</style>
 </head>
-<body style="margin:0;background:#000;overflow:hidden">
-<video id="cam" autoplay playsinline muted style="position:absolute;width:100vw;height:100vh;object-fit:cover;transform:scaleX(-1)"></video>
-<canvas id="c" style="position:absolute;top:0;left:0"></canvas>
-<div id="msg" style="position:absolute;top:10px;left:10px;color:#fff;font:16px sans-serif;background:rgba(0,0,0,.5);padding:6px 10px;border-radius:6px">Loading...</div>
+<body>
+<video id="cam" autoplay playsinline muted></video>
+<canvas id="three"></canvas>
+<canvas id="overlay"></canvas>
+<div id="msg">Loading…</div>
+<div id="label"></div>
+<svg id="palm" viewBox="0 0 56 56"><circle cx="28" cy="28" r="24" fill="none" stroke="rgba(255,255,255,.25)" stroke-width="5"/><circle id="palmRing" cx="28" cy="28" r="24" fill="none" stroke="#4ade80" stroke-width="5" stroke-dasharray="151" stroke-dashoffset="151" transform="rotate(-90 28 28)"/></svg>
+<div id="help">
+  <b>Point</b> at a part to highlight it<br>
+  <b>Pinch &amp; drag</b> to rotate<br>
+  <b>Open palm</b> (hold) to explode / reassemble<br>
+  Touch or mouse also work
+</div>
+<div id="bar">
+  <button id="explodeBtn">Explode</button>
+  <button id="resetBtn">Reset</button>
+  <button id="helpBtn">Hide tips</button>
+  <label>Load .glb<input id="file" type="file" accept=".glb,.gltf"></label>
+</div>
+
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+}}
+</script>
 <script type="module">
-import {FilesetResolver, HandLandmarker} from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
-const v = document.getElementById('cam'), c = document.getElementById('c'), ctx = c.getContext('2d'), msg = document.getElementById('msg');
-try {
-  v.srcObject = await navigator.mediaDevices.getUserMedia({video: {facingMode: "user"}});
-  await new Promise(r => v.onloadeddata = r);
-  const fs = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
-  const hl = await HandLandmarker.createFromOptions(fs, {
-    baseOptions: {
-      modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
-      delegate: "GPU"
-    },
-    runningMode: "VIDEO", numHands: 1
-  });
-  msg.textContent = "Show your hand";
-  let last = -1;
-  function loop() {
-    if (c.width !== innerWidth || c.height !== innerHeight) { c.width = innerWidth; c.height = innerHeight; }
-    if (v.currentTime !== last) {
-      last = v.currentTime;
-      ctx.clearRect(0, 0, c.width, c.height);
-      const r = hl.detectForVideo(v, performance.now());
-      // map video coords to the cover-scaled, mirrored screen
-      const s = Math.max(c.width / v.videoWidth, c.height / v.videoHeight);
-      const ox = (c.width - v.videoWidth * s) / 2, oy = (c.height - v.videoHeight * s) / 2;
-      if (r.landmarks.length) {
-        const tip = r.landmarks[0][8];
-        const x = c.width - (tip.x * v.videoWidth * s + ox), y = tip.y * v.videoHeight * s + oy;
-        ctx.fillStyle = 'red';
-        ctx.beginPath(); ctx.arc(x, y, 15, 0, Math.PI * 2); ctx.fill();
-        msg.textContent = "Tracking your fingertip";
-      } else msg.textContent = "Show your hand";
-    }
-    requestAnimationFrame(loop);
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { FilesetResolver, HandLandmarker } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14';
+
+const $ = id => document.getElementById(id);
+const video = $('cam'), msg = $('msg'), label = $('label'), palmEl = $('palm'), palmRing = $('palmRing');
+const ov = $('overlay'), octx = ov.getContext('2d');
+
+// ---------- 3D scene ----------
+const renderer = new THREE.WebGLRenderer({ canvas: $('three'), alpha: true, antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(40, 1, 0.1, 100);
+camera.position.set(0, 0, 7);
+scene.add(new THREE.HemisphereLight(0xffffff, 0x444466, 1.4));
+const sun = new THREE.DirectionalLight(0xffffff, 2); sun.position.set(3, 5, 4); scene.add(sun);
+const rim = new THREE.DirectionalLight(0x88aaff, 1); rim.position.set(-4, 2, -3); scene.add(rim);
+
+
+const pivot = new THREE.Group(); scene.add(pivot);   // gets placed and rotated
+let model = null, parts = [], explodeT = 0, explodeTarget = 0;
+
+function niceName(raw) {
+  const n = (raw || '').toLowerCase();
+  if (n.startsWith('piston')) return 'Piston';
+  if (n.startsWith('rod')) return 'Connecting rod';
+  if (n.startsWith('lifter')) return 'Valve lifter';
+  if (n.startsWith('spring')) return 'Valve spring link';
+  if (n.startsWith('body')) return 'Engine block part';
+  return (raw || 'Part').replace(/[_-]?\d[\d_-]*.*$/, '').replace(/_/g, ' ') || 'Part';
+}
+
+function layout() {
+  const w = innerWidth, h = innerHeight;
+  renderer.setSize(w, h, false);
+  ov.width = w; ov.height = h;
+  camera.aspect = w / h; camera.updateProjectionMatrix();
+  // landscape: model on the right of the presenter; portrait: lower middle
+  if (w > h) pivot.position.set(1.4 * camera.aspect / 1.78, 0, 0);
+  else pivot.position.set(0, -0.9, 0);
+}
+addEventListener('resize', layout);
+
+function loadModel(url) {
+  msg.textContent = 'Loading model…';
+  new GLTFLoader().load(url, gltf => {
+    if (model) pivot.remove(model);
+    model = gltf.scene; parts = [];
+    // normalise size and centre it
+    const box = new THREE.Box3().setFromObject(model);
+    const size = box.getSize(new THREE.Vector3()), centre = box.getCenter(new THREE.Vector3());
+    const s = 2.4 / Math.max(size.x, size.y, size.z);
+    model.scale.setScalar(s);
+    model.position.copy(centre).multiplyScalar(-s);
+    pivot.rotation.set(0.35, -0.6, 0);
+    pivot.add(model);
+    model.updateMatrixWorld(true);
+    const mc = new THREE.Box3().setFromObject(model).getCenter(new THREE.Vector3());
+    model.traverse(o => {
+      if (!o.isMesh) return;
+      o.material = Array.isArray(o.material) ? o.material.map(m => m.clone()) : o.material.clone();
+      const c = new THREE.Box3().setFromObject(o).getCenter(new THREE.Vector3());
+      let dir = c.clone().sub(mc);
+      if (dir.length() < 0.05) dir.set(0, 1, 0);
+      dir.multiplyScalar(0.9);
+      // convert that world offset into the mesh's parent space
+      const a = o.parent.worldToLocal(c.clone()), b = o.parent.worldToLocal(c.clone().add(dir));
+      parts.push({ mesh: o, home: o.position.clone(), offset: b.sub(a), name: niceName(o.name || o.parent?.name) });
+    });
+    explodeT = explodeTarget = 0;
+    msg.textContent = handsReady ? 'Show your hand' : 'Starting camera…';
+  }, undefined, e => { msg.textContent = 'Could not load model: ' + e.message; });
+}
+
+let hovered = null;
+function setHighlight(part) {
+  if (hovered === part) return;
+  const paint = (p, on) => {
+    if (!p) return;
+    const ms = Array.isArray(p.mesh.material) ? p.mesh.material : [p.mesh.material];
+    ms.forEach(m => { if (m.emissive) { m.emissive.set(on ? 0xffaa00 : 0x000000); m.emissiveIntensity = on ? 0.8 : 1; } });
+  };
+  paint(hovered, false); paint(part, true); hovered = part;
+}
+
+const raycaster = new THREE.Raycaster();
+function pick(x, y) {
+  if (!model) return null;
+  raycaster.setFromCamera({ x: x / innerWidth * 2 - 1, y: -(y / innerHeight) * 2 + 1 }, camera);
+  const hit = raycaster.intersectObject(model, true)[0];
+  return hit ? parts.find(p => p.mesh === hit.object) : null;
+}
+
+// mouse / touch fallback: hover or tap to highlight, drag to rotate, wheel to zoom
+let drag = null;
+const cv = renderer.domElement;
+cv.addEventListener('pointerdown', e => { drag = { x: e.clientX, y: e.clientY }; cv.setPointerCapture(e.pointerId); });
+cv.addEventListener('pointerup', () => { drag = null; });
+cv.addEventListener('pointermove', e => {
+  if (handVisible) return;
+  if (drag) {
+    pivot.rotation.y += (e.clientX - drag.x) * 0.01;
+    pivot.rotation.x += (e.clientY - drag.y) * 0.01;
+    drag = { x: e.clientX, y: e.clientY };
   }
-  loop();
-} catch (e) { msg.textContent = "Error: " + e.message; }
+  const p = pick(e.clientX, e.clientY); setHighlight(p); showLabel(p, e.clientX, e.clientY);
+});
+cv.addEventListener('wheel', e => { camera.position.z = Math.min(14, Math.max(3.5, camera.position.z + e.deltaY * 0.005)); }, { passive: true });
+
+function showLabel(p, x, y) {
+  if (!p) { label.style.display = 'none'; return; }
+  label.textContent = p.name; label.style.display = 'block';
+  label.style.left = x + 'px'; label.style.top = y + 'px';
+}
+
+const toggleExplode = () => { explodeTarget = explodeTarget ? 0 : 1; $('explodeBtn').textContent = explodeTarget ? 'Reassemble' : 'Explode'; };
+$('explodeBtn').onclick = toggleExplode;
+$('resetBtn').onclick = () => { pivot.rotation.set(0.35, -0.6, 0); explodeTarget = 0; $('explodeBtn').textContent = 'Explode'; camera.position.set(0, 0, 7); layout(); };
+$('helpBtn').onclick = () => { const h = $('help'); const hide = h.style.display !== 'none'; h.style.display = hide ? 'none' : 'block'; $('helpBtn').textContent = hide ? 'Show tips' : 'Hide tips'; };
+$('file').onchange = e => { const f = e.target.files[0]; if (f) loadModel(URL.createObjectURL(f)); };
+
+// ---------- hand tracking ----------
+let hands = null, handsReady = false, handVisible = false, lastVideoTime = -1;
+let tip = null, pinching = false, lastPinch = null, palmStart = 0, palmLatched = false;
+
+function toScreen(lm) {
+  // map normalised video coords onto the cover-scaled, mirrored video on screen
+  const vw = video.videoWidth, vh = video.videoHeight, w = innerWidth, h = innerHeight;
+  const s = Math.max(w / vw, h / vh), ox = (w - vw * s) / 2, oy = (h - vh * s) / 2;
+  return { x: w - (lm.x * vw * s + ox), y: lm.y * vh * s + oy };
+}
+const d2 = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+
+function handleHand(lm) {
+  const handSize = d2(lm[0], lm[9]);
+  const pinchRatio = d2(lm[4], lm[8]) / handSize;
+  if (!pinching && pinchRatio < 0.32) pinching = true;
+  else if (pinching && pinchRatio > 0.5) pinching = false;
+
+  const raw = toScreen(pinching ? { x: (lm[4].x + lm[8].x) / 2, y: (lm[4].y + lm[8].y) / 2 } : lm[8]);
+  tip = tip ? { x: tip.x + (raw.x - tip.x) * 0.5, y: tip.y + (raw.y - tip.y) * 0.5 } : raw;
+
+  // open palm = four fingertips further from wrist than their middle joints
+  const extended = [[8, 6], [12, 10], [16, 14], [20, 18]].every(([t, p]) => d2(lm[t], lm[0]) > d2(lm[p], lm[0]) * 1.15);
+  const openPalm = extended && pinchRatio > 0.6;
+
+  if (pinching) {
+    if (lastPinch) {
+      pivot.rotation.y += (tip.x - lastPinch.x) * 0.012;
+      pivot.rotation.x += (tip.y - lastPinch.y) * 0.012;
+    }
+    lastPinch = { ...tip };
+    setHighlight(null); label.style.display = 'none';
+  } else {
+    lastPinch = null;
+    const p = openPalm ? null : pick(tip.x, tip.y);
+    setHighlight(p); showLabel(p, tip.x, tip.y);
+  }
+
+  // hold an open palm ~0.8s to toggle explode
+  const now = performance.now();
+  if (openPalm && !palmLatched) {
+    if (!palmStart) palmStart = now;
+    const prog = Math.min((now - palmStart) / 800, 1);
+    palmEl.style.display = 'block';
+    const c = toScreen(lm[9]);
+    palmEl.style.left = (c.x - 28) + 'px'; palmEl.style.top = (c.y - 28) + 'px';
+    palmRing.setAttribute('stroke-dashoffset', 151 * (1 - prog));
+    if (prog >= 1) { toggleExplode(); palmLatched = true; palmEl.style.display = 'none'; }
+  } else if (!openPalm) { palmStart = 0; palmLatched = false; palmEl.style.display = 'none'; }
+  else palmEl.style.display = 'none';
+
+  msg.textContent = pinching ? 'Rotating' : openPalm ? (palmLatched ? 'Close your hand' : 'Hold open palm…') : 'Pointing';
+}
+
+function drawCursor() {
+  octx.clearRect(0, 0, ov.width, ov.height);
+  if (!handVisible || !tip) return;
+  octx.beginPath();
+  octx.arc(tip.x, tip.y, pinching ? 18 : 12, 0, Math.PI * 2);
+  octx.fillStyle = pinching ? 'rgba(74,222,128,.9)' : 'rgba(255,60,60,.9)';
+  octx.fill();
+  octx.lineWidth = 3; octx.strokeStyle = '#fff'; octx.stroke();
+}
+
+async function startHands() {
+  try {
+    video.srcObject = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } } });
+    await new Promise(r => video.readyState >= 2 ? r() : (video.onloadeddata = r));
+    msg.textContent = 'Loading hand tracking…';
+    const fs = await FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm');
+    hands = await HandLandmarker.createFromOptions(fs, {
+      baseOptions: { modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task', delegate: 'GPU' },
+      runningMode: 'VIDEO', numHands: 1
+    });
+    handsReady = true; msg.textContent = 'Show your hand';
+  } catch (e) { msg.textContent = 'Camera/hand tracking unavailable: ' + e.message + ' (touch still works)'; }
+}
+
+// ---------- main loop ----------
+function animate() {
+  requestAnimationFrame(animate);
+  if (handsReady && video.currentTime !== lastVideoTime) {
+    lastVideoTime = video.currentTime;
+    const r = hands.detectForVideo(video, performance.now());
+    handVisible = r.landmarks.length > 0;
+    if (handVisible) handleHand(r.landmarks[0]);
+    else { tip = null; lastPinch = null; pinching = false; palmStart = 0; palmEl.style.display = 'none'; if (msg.textContent !== 'Show your hand') { msg.textContent = 'Show your hand'; setHighlight(null); label.style.display = 'none'; } }
+  }
+  explodeT += (explodeTarget - explodeT) * 0.08;
+  for (const p of parts) p.mesh.position.copy(p.home).addScaledVector(p.offset, explodeT);
+  renderer.render(scene, camera);
+  drawCursor();
+}
+
+layout();
+loadModel('models/engine.glb');
+startHands();
+animate();
 </script>
 </body>
 </html>

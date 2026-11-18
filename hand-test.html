@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Hand tracking demo</title>
+</head>
+<body style="margin:0;background:#000;overflow:hidden">
+<video id="cam" autoplay playsinline muted style="position:absolute;width:100vw;height:100vh;object-fit:cover;transform:scaleX(-1)"></video>
+<canvas id="c" style="position:absolute;top:0;left:0"></canvas>
+<div id="msg" style="position:absolute;top:10px;left:10px;color:#fff;font:16px sans-serif;background:rgba(0,0,0,.5);padding:6px 10px;border-radius:6px">Loading...</div>
+<script type="module">
+import {FilesetResolver, HandLandmarker} from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
+const v = document.getElementById('cam'), c = document.getElementById('c'), ctx = c.getContext('2d'), msg = document.getElementById('msg');
+try {
+  v.srcObject = await navigator.mediaDevices.getUserMedia({video: {facingMode: "user"}});
+  await new Promise(r => v.onloadeddata = r);
+  const fs = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
+  const hl = await HandLandmarker.createFromOptions(fs, {
+    baseOptions: {
+      modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+      delegate: "GPU"
+    },
+    runningMode: "VIDEO", numHands: 1
+  });
+  msg.textContent = "Show your hand";
+  let last = -1;
+  function loop() {
+    if (c.width !== innerWidth || c.height !== innerHeight) { c.width = innerWidth; c.height = innerHeight; }
+    if (v.currentTime !== last) {
+      last = v.currentTime;
+      ctx.clearRect(0, 0, c.width, c.height);
+      const r = hl.detectForVideo(v, performance.now());
+      // map video coords to the cover-scaled, mirrored screen
+      const s = Math.max(c.width / v.videoWidth, c.height / v.videoHeight);
+      const ox = (c.width - v.videoWidth * s) / 2, oy = (c.height - v.videoHeight * s) / 2;
+      if (r.landmarks.length) {
+        const tip = r.landmarks[0][8];
+        const x = c.width - (tip.x * v.videoWidth * s + ox), y = tip.y * v.videoHeight * s + oy;
+        ctx.fillStyle = 'red';
+        ctx.beginPath(); ctx.arc(x, y, 15, 0, Math.PI * 2); ctx.fill();
+        msg.textContent = "Tracking your fingertip";
+      } else msg.textContent = "Show your hand";
+    }
+    requestAnimationFrame(loop);
+  }
+  loop();
+} catch (e) { msg.textContent = "Error: " + e.message; }
+</script>
+</body>
+</html>
